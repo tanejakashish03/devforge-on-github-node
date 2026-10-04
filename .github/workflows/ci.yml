@@ -1,0 +1,71 @@
+name: Node CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:latest
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run Trivy filesystem scan
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$TRIVY_IMAGE" \
+            fs --severity CRITICAL,HIGH --exit-code 1 --ignore-unfixed --no-progress .
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+          docker build --pull -t $REGISTRY/$IMAGE_NAME:latest .
+
+      - name: Scan Docker image with Trivy
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/work" -w /work "$TRIVY_IMAGE" \
+            image --severity CRITICAL,HIGH --exit-code 1 --ignore-unfixed --no-progress "$REGISTRY/$IMAGE_NAME:latest"
+
+      - name: Push Docker image
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+          docker push $REGISTRY/$IMAGE_NAME:latest
